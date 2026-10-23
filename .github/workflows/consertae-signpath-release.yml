@@ -1,0 +1,179 @@
+name: Consertae Windows 1.4.9 — build, verify, optional SignPath signing
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_signing:
+        description: "Submit to SignPath after Foundation approval and manual environment review"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 105
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    env:
+      CONSERTAE_VCPKG_ROOT: 'C:\ConsertaeVcpkg'
+      VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+    steps:
+      - name: Preserve upstream checkout bytes
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.safecrlf true
+
+      - name: Checkout GitHub fork and pinned hbb_common submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify 27 customized source files and exact submodule revision
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $m = Get-Content 'scripts/consertae/release-patch-manifest.json' -Raw | ConvertFrom-Json
+          if ($m.version -ne '1.4.9') { throw 'Unexpected source version' }
+          $files = @($m.changed_files.PSObject.Properties)
+          if ($files.Count -ne 27) { throw 'Unexpected patch inventory' }
+          foreach ($entry in $files) {
+            if (-not (Test-Path -LiteralPath $entry.Name)) { throw "Missing custom source file $($entry.Name)" }
+            $hash=(Get-FileHash -LiteralPath $entry.Name -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne $entry.Value) { throw "Customization hash mismatch: $($entry.Name)" }
+          }
+          $subref=(& git -C libs/hbb_common rev-parse HEAD).Trim()
+          if ($subref -ne $m.child_git_rev) { throw 'hbb_common checkout does not match release manifest' }
+          Write-Host 'Audited Consertae custom source and submodule revision verified'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: '15.0.6'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.24.5'
+          architecture: x64
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.75.0'
+          targets: x86_64-pc-windows-msvc
+
+      - name: Prepare isolated pinned vcpkg checkout
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "$env:CONSERTAE_VCPKG_ROOT\.git")) {
+            if (Test-Path $env:CONSERTAE_VCPKG_ROOT) { throw 'Unexpected vcpkg directory' }
+            git clone https://github.com/microsoft/vcpkg.git "$env:CONSERTAE_VCPKG_ROOT"
+            if ($LASTEXITCODE -ne 0) { throw 'vcpkg clone failed' }
+          }
+          if (-not (Test-Path "$env:CONSERTAE_VCPKG_ROOT\vcpkg.exe")) {
+            & "$env:CONSERTAE_VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+            if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
+          }
+          "VCPKG_ROOT=$env:CONSERTAE_VCPKG_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build source with checked toolchain
+        shell: pwsh
+        run: |
+          & .\scripts\consertae\build-windows-x64.ps1 `
+            -SourceDir "$env:GITHUB_WORKSPACE" `
+            -VcpkgRoot "$env:CONSERTAE_VCPKG_ROOT" `
+            -OutputDir "$env:RUNNER_TEMP\client-bundle"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
+
+      - name: Package one portable Windows EXE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          python -m pip install --disable-pip-version-check "brotli==1.1.0"
+          if ($LASTEXITCODE -ne 0) { throw 'Brotli installation failed' }
+          $folder=Join-Path $env:RUNNER_TEMP 'client-bundle'
+          $client=Join-Path $folder 'Consertae-Suporte.exe'
+          $packer=Join-Path $env:GITHUB_WORKSPACE 'libs\portable'
+          if (-not (Test-Path $client)) { throw 'Client missing' }
+          python (Join-Path $packer 'generate.py') -f $folder -o $packer -e $client -l 7
+          if ($LASTEXITCODE -ne 0) { throw 'Portable packer failed' }
+          $candidate=Join-Path $env:GITHUB_WORKSPACE 'target\release\rustdesk-portable-packer.exe'
+          if (-not (Test-Path $candidate)) {
+            $candidate=Join-Path $packer 'target\release\rustdesk-portable-packer.exe'
+          }
+          if (-not (Test-Path $candidate)) { throw 'Portable executable missing' }
+          $out=Join-Path $env:RUNNER_TEMP 'Consertae-Suporte-1.4.9-portable.exe'
+          Copy-Item $candidate $out
+          if ((Get-Item $out).Length -lt 5000000) { throw 'Unexpectedly small bundle' }
+          if ((Get-AuthenticodeSignature $out).Status -ne 'NotSigned') { throw 'Unsigned build unexpectedly signed' }
+          node scripts/consertae/verify_portable_bundle.js $out $folder
+          if ($LASTEXITCODE -ne 0) { throw 'Embedded files failed integrity verification' }
+          Get-FileHash $out -Algorithm SHA256 | Format-List
+          Write-Host 'Portable executable passed source, package and signature-state checks'
+
+      - name: Upload original GitHub workflow artifact for SignPath origin verification
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: consertae-1.4.9-portable-unsigned
+          path: ${{ runner.temp }}\Consertae-Suporte-1.4.9-portable.exe
+          retention-days: 7
+          if-no-files-found: error
+
+  signpath:
+    name: Sign only after Foundation approval and environment review
+    needs: build
+    if: ${{ inputs.request_signing }}
+    runs-on: ubuntu-latest
+    environment: signpath-foundation
+    timeout-minutes: 30
+    steps:
+      - name: Submit GitHub artifact to approved SignPath policy
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ needs.build.outputs.artifact_id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Preserve signed candidate for QA only
+        uses: actions/upload-artifact@v4
+        with:
+          name: consertae-1.4.9-signpath-signed-candidate
+          path: signed/
+          retention-days: 14
+          if-no-files-found: error
+
+  verify-signature:
+    needs: signpath
+    if: ${{ inputs.request_signing }}
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: consertae-1.4.9-signpath-signed-candidate
+          path: signed
+      - name: Reject missing, invalid or unexpected Authenticode signer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $executables=@(Get-ChildItem signed -Recurse -Filter '*.exe' -File)
+          if ($executables.Count -ne 1) { throw 'Expected exactly one signed portable EXE' }
+          $signature=Get-AuthenticodeSignature $executables[0].FullName
+          if ($signature.Status -ne 'Valid') { throw "Authenticode validation failed: $($signature.Status)" }
+          if ($signature.SignerCertificate.Subject -notmatch 'SignPath Foundation') {
+            throw 'Unexpected signer identity'
+          }
+          Get-FileHash $executables[0].FullName -Algorithm SHA256 | Format-List
+          Write-Host 'Valid Foundation signature verified. Manual Windows QA still required before production.'

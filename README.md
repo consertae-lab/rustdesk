@@ -1,3 +1,17 @@
+## Consertaê Suporte Remoto — fork público
+
+Esta é a versão personalizada do cliente **RustDesk 1.4.9** para a Consertaê, mantendo o vínculo público com [rustdesk/rustdesk](https://github.com/rustdesk/rustdesk) e a licença AGPL-3.0.
+
+- [Site e download do aplicativo](https://suporte.consertae.tec.br/) — a versão Windows atual **ainda não possui assinatura Authenticode**.
+- [Code signing policy](docs/consertae/CODE-SIGNING-POLICY.md) — candidatura à SignPath Foundation, **ainda não aprovada**.
+- [Privacidade e consentimento — minuta de homologação](docs/consertae/PRIVACY-AND-CONSENT.md).
+- [Procedência do código-fonte 1.4.9](docs/consertae/SOURCE-PROVENANCE.md).
+- [Submódulo público hbb_common da Consertaê](https://github.com/consertae-lab/hbb_common/tree/consertae-suporte-1.4.9).
+
+As alterações da Consertaê não são uma release oficial RustDesk. Não solicite nem permita conexões remotas sem autorização do titular do equipamento.
+
+---
+
 <p align="center">
   <img src="res/logo-header.svg" alt="RustDesk - Your remote desktop"><br>
   <a href="#raw-steps-to-build">Build</a> •
