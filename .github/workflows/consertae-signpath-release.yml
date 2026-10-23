@@ -46,7 +46,17 @@ jobs:
           foreach ($entry in $files) {
             if (-not (Test-Path -LiteralPath $entry.Name)) { throw "Missing custom source file $($entry.Name)" }
             $hash=(Get-FileHash -LiteralPath $entry.Name -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($hash -ne $entry.Value) { throw "Customization hash mismatch: $($entry.Name)" }
+            if ($hash -ne $entry.Value) {
+              $raw=[System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $entry.Name).Path)
+              $normalized=[System.Text.Encoding]::Latin1.GetBytes(
+                [System.Text.Encoding]::Latin1.GetString($raw).Replace("`r`n","`n")
+              )
+              $normalizedHash=[Convert]::ToHexString(
+                [System.Security.Cryptography.SHA256]::HashData($normalized)
+              ).ToLowerInvariant()
+              if ($normalizedHash -ne $entry.Value) { throw "Customization hash mismatch: $($entry.Name)" }
+              Write-Host "Accepted reversible CRLF checkout: $($entry.Name)"
+            }
           }
           $subref=(& git -C libs/hbb_common rev-parse HEAD).Trim()
           if ($subref -ne $m.child_git_rev) { throw 'hbb_common checkout does not match release manifest' }
