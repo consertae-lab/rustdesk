@@ -1006,7 +1006,8 @@ pub fn get_app_name() -> String {
 
 #[inline]
 pub fn is_rustdesk() -> bool {
-    hbb_common::config::APP_NAME.read().unwrap().eq("RustDesk")
+    // Consertae Suporte is an OSS-branded RustDesk build, not a Pro/custom client.
+    true
 }
 
 #[inline]
@@ -2080,7 +2081,27 @@ pub fn rustdesk_interval(i: Interval) -> ThrottledInterval {
     ThrottledInterval::new(i)
 }
 
+pub fn apply_consertae_support_defaults() {
+    // Consertaê Suporte OSS: production infrastructure and assisted-access policy.
+    // Keep APP_NAME/internal engine behavior untouched; only effective settings are preset/fixed.
+    *config::EXE_RENDEZVOUS_SERVER.write().unwrap() = "remote.consertae.tec.br".to_owned();
+    {
+        let mut settings = config::OVERWRITE_SETTINGS.write().unwrap();
+        settings.insert("custom-rendezvous-server".to_owned(), "remote.consertae.tec.br".to_owned());
+        settings.insert("relay-server".to_owned(), "remote.consertae.tec.br".to_owned());
+        settings.insert("key".to_owned(), "pMBoH2X9yRRB8kVNaNHXNQv1GMMsXnLgyLWgRgMxZWA=".to_owned());
+        settings.insert("approve-mode".to_owned(), "click".to_owned());
+        settings.insert("verification-method".to_owned(), "use-temporary-password".to_owned());
+    }
+    {
+        let mut builtin = config::BUILTIN_SETTINGS.write().unwrap();
+        builtin.insert("allow-logon-screen-password".to_owned(), "N".to_owned());
+        builtin.insert("disable-change-permanent-password".to_owned(), "Y".to_owned());
+    }
+}
+
 pub fn load_custom_client() {
+    apply_consertae_support_defaults();
     #[cfg(debug_assertions)]
     if let Ok(data) = std::fs::read_to_string("./custom.txt") {
         read_custom_client(data.trim());
@@ -2281,7 +2302,8 @@ pub fn get_builtin_option(key: &str) -> String {
 
 #[inline]
 pub fn is_custom_client() -> bool {
-    get_app_name() != "RustDesk"
+    // Keep branded Consertae builds on the normal RustDesk OSS code path.
+    false
 }
 
 pub fn verify_login(_raw: &str, _id: &str) -> bool {
